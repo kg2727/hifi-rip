@@ -198,7 +198,10 @@ def test_mix_briefing_explains_the_tradeoff_in_consequences():
     result = apply_host_decision(classify(DJ_SET), ContentClass.CONTINUOUS_MIX)
     briefing = result.briefing()
     assert "both tracks are genuinely playing at once" in briefing
-    assert "reproduces the mix exactly" in briefing
+    assert "byte" in briefing
+    # The claim must stay bounded: cuts are packet-aligned, so "exactly"
+    # without qualification would be measurably false.
+    assert "packet edges" in briefing
     assert "no chapter markers" in briefing
 
 

@@ -130,9 +130,10 @@ HANDLING: dict[ContentClass, Handling] = {
             "what the audio contains. Keeping one file with chapter markers "
             "stays skippable in any modern player, preserves the transitions "
             "the artist built, and cannot cut in the wrong place. Splitting "
-            "gives real per-track files, and concatenating them reproduces "
-            "the mix exactly, since nothing is re-encoded and no silence is "
-            "inserted."
+            "gives real per-track files; nothing is re-encoded and no silence "
+            "is inserted, and rejoining them restores the original audio byte "
+            "for byte, though cuts land on packet edges rather than exact "
+            "sample positions."
         ),
     ),
     ContentClass.LIVE_PERFORMANCE: Handling(
