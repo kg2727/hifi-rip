@@ -40,8 +40,39 @@ SOURCE_TIMEOUT = 60
 
 
 def available_keys(environ: dict[str, str] | None = None) -> frozenset[str]:
+    """Names of the credential variables that are set.
+
+    Returns variable *names*, never their values. Every caller -- routing,
+    reporting, `doctor` -- needs only presence, so the value never leaves the
+    environment and cannot be printed, logged, or serialised by accident.
+    """
     env = environ if environ is not None else dict(os.environ)
     return frozenset(name for name in KEY_VARIABLES if env.get(name))
+
+
+def describe_credentials(environ: dict[str, str] | None = None) -> str:
+    """Report which credentials are configured, and what each one unlocks.
+
+    Deliberately prints presence and nothing else. A diagnostic command that
+    echoes a secret is one screen-share or pasted bug report away from
+    leaking it, and users paste `doctor` output into issues constantly.
+    """
+    present = available_keys(environ)
+    keyed = sorted(
+        (spec for spec in REGISTRY.values() if spec.requires_key),
+        key=lambda spec: -spec.weight,
+    )
+
+    lines = []
+    for spec in keyed:
+        state = "set" if spec.requires_key in present else "not set"
+        lines.append(f"  {spec.requires_key:16s} {state:8s} -> {spec.name}")
+    if not present:
+        lines.append(
+            "  No API credentials configured. Every keyless source still "
+            "works;\n  see docs/credentials.md for what each key adds."
+        )
+    return "\n".join(lines)
 
 
 @dataclass

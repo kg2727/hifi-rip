@@ -25,6 +25,7 @@ from .formats import NoUsableStream
 from .library import LibraryError, hand_off, place, render_path
 from .probe import ProbeError, probe
 from .resolve import resolution_matrix, resolve
+from .resolver import describe_credentials
 from .resolver import resolve as resolve_sources
 from .split import split
 from .tag import TagError, Tags, fetch_thumbnail, square_crop, write_tags
@@ -167,6 +168,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(cookies_mod.remedy(cookies_mod.CookieProblem.PERMISSION_DENIED,
                                  blocked[0].name))
         status = EXIT_DEGRADED
+
+    print("\n=== api credentials ===")
+    print(describe_credentials())
 
     if config.cookies_file:
         print("\n=== cookie file ===")

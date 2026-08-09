@@ -5,3 +5,21 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Secrets. API keys reach this project through environment variables only --
+# there is deliberately no config field that can hold one -- but design
+# intent is not a guarantee, so the obvious filenames are blocked outright.
+.env
+.env.*
+*.env
+env
+!src/hifirip/environment.py
+*.token
+*.secret
+*secret*
+*credential*
+cookies.txt
+*.binarycookies
+
+# Local survey and batch output; can contain long URL lists.
+data/survey.jsonl
