@@ -56,6 +56,9 @@ class Config:
     handoff: str = "filesystem"
     #: Per-track path template, applied under `library_root`.
     naming: str = "{albumartist}/{album}/{track:02d} - {title}"
+    #: Used when a recording has neither album nor track number. The album
+    #: template would otherwise invent both, yielding "Unknown Album/00 - X".
+    naming_single: str = "{albumartist}/{title}"
     #: Off by default and never enabled implicitly: transcoding stacks a
     #: second lossy generation, so it has to be an explicit human choice.
     allow_transcode: bool = False
@@ -184,6 +187,9 @@ cookies_from_browser = "chrome"
 
 library_root = "~/Music/hifi-rip"
 naming = "{albumartist}/{album}/{track:02d} - {title}"
+# Used when a recording has neither album nor track number, so standalone
+# singles do not land under an invented "Unknown Album/00 - ..." path.
+naming_single = "{albumartist}/{title}"
 
 # Transcoding stacks a second lossy generation. Leave this off unless you
 # have a device that genuinely cannot play AAC or Opus.

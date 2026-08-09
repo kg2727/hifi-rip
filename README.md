@@ -84,11 +84,20 @@ without waiting on a release of this package.
 ## Use
 
 ```sh
-hifi-rip <url>                        # auto-detects your environment
-hifi-rip <url> --profile archive      # override the destination profile
-hifi-rip explain                      # print the full resolution matrix
+hifi-rip rip <url>                    # download, tag, and file it
+hifi-rip rip <url> --profile archive  # override the destination profile
+hifi-rip rip <url> --dry-run          # show the destination without writing
+hifi-rip rip <url> --no-handoff       # place the file, don't touch your library
+hifi-rip explain <url>                # the resolved decision, without downloading
 hifi-rip doctor <url>                 # verify credentials independently
+hifi-rip matrix                       # print the tier x destination table
+hifi-rip config --explain             # every setting and which layer set it
 ```
+
+Uploads whose track boundaries are ranges rather than points — DJ sets, live
+concerts, hours-long mixes — will not split without an explicit `--split` or
+`--no-split`, and print an explanation of the tradeoff for that specific
+upload first. Splitting itself is still being built; `--no-split` works today.
 
 Every rip prints its full decision trace: which stream was chosen, which were
 rejected, and why. "Highest quality available" is an unverifiable claim without

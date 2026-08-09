@@ -11,16 +11,20 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from . import cookies as cookies_mod
 from .config import EXAMPLE_CONFIG, load
-from .content import classify
+from .content import ContentClass, apply_host_decision, classify
+from .download import DownloadError, fetch, remux
 from .entitlement import Severity
 from .environment import detect
 from .formats import NoUsableStream
+from .library import LibraryError, hand_off, place, render_path
 from .probe import ProbeError, probe
 from .resolve import resolution_matrix, resolve
+from .tag import TagError, Tags, fetch_thumbnail, square_crop, write_tags
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -151,15 +155,140 @@ def cmd_matrix(_: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_rip(args: argparse.Namespace) -> int:
-    print(
-        "`rip` is not implemented yet. The stream-selection, credential and\n"
-        "classification stages are complete and inspectable with:\n"
-        "    hifi-rip explain <url>\n"
-        "Downloading, splitting and tagging are still being built.",
-        file=sys.stderr,
+def _tags_from_youtube(info: dict, url: str) -> Tags:
+    """Seed tags from YouTube's own metadata.
+
+    A placeholder for the consensus resolver: provenance is recorded as
+    "youtube" for every field so that, once multiple sources are reconciled,
+    an existing file's audit trail still says where its tags came from.
+    """
+    title = info.get("track") or info.get("title") or "Unknown Title"
+    artist = info.get("artist") or info.get("uploader")
+    fields = {"title": "youtube", "artist": "youtube"}
+    if info.get("album"):
+        fields["album"] = "youtube"
+    return Tags(
+        title=title,
+        artist=artist,
+        album=info.get("album"),
+        date=(info.get("release_year") and str(info["release_year"])) or None,
+        source_url=url,
+        provenance=fields,
     )
-    return EXIT_ERROR
+
+
+def _resolve_class(classification, args) -> int | None:
+    """Settle the content class, or explain what is needed and stop."""
+    if args.content_class:
+        apply_host_decision(classification, ContentClass(args.content_class), "--content-class")
+        return None
+
+    if classification.needs_escalation:
+        print(classification.escalation_brief(), file=sys.stderr)
+        print(
+            "\nRe-run with --content-class <class> once decided.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    return None
+
+
+def cmd_rip(args: argparse.Namespace) -> int:
+    config = load(overrides=_overrides(args))
+    try:
+        result = _probe(args.url, config)
+    except ProbeError as exc:
+        source = config.cookies_from_browser or config.cookies_file or "none"
+        diagnosis = cookies_mod.diagnose_stderr(str(exc), source)
+        print(diagnosis.report() if diagnosis.is_user_fixable else str(exc),
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        decision = resolve(result, profile=args.profile)
+    except NoUsableStream as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ERROR
+
+    classification = classify(result.info)
+    early_exit = _resolve_class(classification, args)
+    if early_exit is not None:
+        return early_exit
+
+    for note in decision.entitlement.diagnostics:
+        if note.severity is Severity.WARNING:
+            print(str(note), file=sys.stderr)
+
+    # Splitting is a user decision for classes where boundaries are ranges
+    # rather than points; see content.HANDLING.
+    handling = classification.handling
+    wants_split = args.split if args.split is not None else handling.splits
+    if wants_split is None:
+        print(classification.briefing())
+        print(
+            "\nThis needs your decision: re-run with --split for per-track "
+            "files, or --no-split to keep it as one file.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if wants_split:
+        print(
+            "Splitting is not implemented yet; --no-split works today.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    print(decision.selection.explain())
+    print()
+
+    workdir = Path(tempfile.mkdtemp(prefix="hifi-rip-"))
+    try:
+        source = fetch(
+            args.url, decision.stream, workdir,
+            cookies_from_browser=config.cookies_from_browser,
+            cookies_file=config.cookies_file,
+            progress=not args.quiet,
+        )
+        staged = workdir / f"audio.{decision.stream.container}"
+        rip = remux(source, staged)
+        print(rip.report())
+
+        tags = _tags_from_youtube(result.info, args.url)
+        cover = None
+        thumbnail = fetch_thumbnail(args.url, workdir / "thumb")
+        if thumbnail:
+            try:
+                cover = square_crop(thumbnail, workdir / "cover.jpg").read_bytes()
+            except TagError as exc:
+                print(f"  cover art skipped: {exc}", file=sys.stderr)
+        write_tags(staged, tags, cover)
+
+        root = Path(args.output_dir) if args.output_dir else config.library_root
+        destination = render_path(
+            config.naming, tags, decision.stream.container, root,
+            single_template=config.naming_single,
+        )
+
+        if args.dry_run:
+            print(f"\nWould write: {destination}")
+            print(hand_off(destination, detect(), dry_run=True).report())
+            return EXIT_OK
+
+        final = place(staged, destination)
+        print(f"\nPlaced: {final}")
+
+        if args.no_handoff:
+            print("  handoff skipped (--no-handoff)")
+        else:
+            print(hand_off(final, detect()).report())
+
+    except (DownloadError, TagError, LibraryError) as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    return EXIT_DEGRADED if decision.entitlement.silently_downgraded else EXIT_OK
 
 
 def _overrides(args: argparse.Namespace) -> dict:
@@ -206,9 +335,25 @@ def build_parser() -> argparse.ArgumentParser:
     matrix = sub.add_parser("matrix", help="print the tier x destination table")
     matrix.set_defaults(func=cmd_matrix)
 
-    rip = sub.add_parser("rip", help="download (not yet implemented)")
+    rip = sub.add_parser("rip", help="download, tag, and file a track")
     rip.add_argument("url")
     add_common(rip)
+    rip.add_argument("--output-dir", type=Path,
+                     help="override the configured library root")
+    rip.add_argument("--content-class",
+                     choices=[c.value for c in ContentClass
+                              if c is not ContentClass.UNKNOWN],
+                     help="settle the content class when rules could not")
+    split = rip.add_mutually_exclusive_group()
+    split.add_argument("--split", dest="split", action="store_true", default=None,
+                       help="produce per-track files")
+    split.add_argument("--no-split", dest="split", action="store_false",
+                       help="keep the upload as one file")
+    rip.add_argument("--dry-run", action="store_true",
+                     help="show the destination and handoff without writing")
+    rip.add_argument("--no-handoff", action="store_true",
+                     help="place the file but do not touch your music library")
+    rip.add_argument("--quiet", action="store_true", help="suppress progress output")
     rip.set_defaults(func=cmd_rip)
 
     return parser
