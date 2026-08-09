@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import cookies as cookies_mod
 from .config import EXAMPLE_CONFIG, load
+from .consensus import strip_noise
 from .content import ContentClass, apply_host_decision, classify
 from .download import DownloadError, fetch, remux
 from .entitlement import Severity
@@ -43,7 +44,8 @@ def _probe(url: str, config, *, with_comments: bool = False) -> object:
     )
 
 
-def _emit_tracks(staged, tracklist, result, decision, config, args, workdir):
+def _emit_tracks(staged, tracklist, result, decision, config, args, workdir,
+                 resolution):
     """Split a staged file into tracks, tag each, and file them."""
     duration = float(result.info.get("duration") or 0.0)
     boundaries = to_boundaries(tracklist, duration)
@@ -55,9 +57,13 @@ def _emit_tracks(staged, tracklist, result, decision, config, args, workdir):
                     container=decision.stream.container)
     print(outcome.report())
 
+    # For multitrack uploads the resolver puts the set or record name on the
+    # album field; the raw video title is the last resort, not the default.
     album = next(
-        (r.value for r in resolution_fields(result) if r.field == "album"), None
-    ) or result.info.get("title")
+        (r.value for r in resolution.metadata.resolutions
+         if r.field == "album" and r.value),
+        None,
+    ) or strip_noise(result.info.get("title") or "")
 
     cover = None
     thumbnail = fetch_thumbnail(args.url, workdir / "thumb")
@@ -99,9 +105,6 @@ def _emit_tracks(staged, tracklist, result, decision, config, args, workdir):
     return EXIT_OK
 
 
-def resolution_fields(result):
-    """Metadata resolutions attached to a probe, if any were computed."""
-    return getattr(result, "_resolutions", [])
 
 
 def cmd_explain(args: argparse.Namespace) -> int:
@@ -220,25 +223,47 @@ def cmd_matrix(_: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _tags_from_youtube(info: dict, url: str) -> Tags:
-    """Seed tags from YouTube's own metadata.
+def _tags_from_resolution(resolution, info: dict, url: str) -> Tags:
+    """Build tags from what the sources agreed, not from the raw upload.
 
-    A placeholder for the consensus resolver: provenance is recorded as
-    "youtube" for every field so that, once multiple sources are reconciled,
-    an existing file's audit trail still says where its tags came from.
+    Using YouTube's own strings here would waste the resolution entirely: a
+    real rip filed itself as "Exit - Still Here (Official Music Video) -
+    Indie Rock 2026" under the uploader's channel name, while the resolver
+    had already established the artist and a clean title from corroborated
+    sources.
+
+    Unsettled fields fall back to the upload rather than being dropped. A
+    field the sources could not agree on is still better filled with the
+    uploader's own words than left blank, but its provenance records which
+    it was, so the audit trail in the file distinguishes the two.
     """
-    title = info.get("track") or info.get("title") or "Unknown Title"
-    artist = info.get("artist") or info.get("uploader")
-    fields = {"title": "youtube", "artist": "youtube"}
-    if info.get("album"):
-        fields["album"] = "youtube"
+    values: dict[str, str] = {}
+    provenance: dict[str, str] = {}
+    for entry in resolution.metadata.resolutions:
+        if entry.value:
+            values[entry.field] = entry.value
+            provenance[entry.field] = (
+                ",".join(sorted({c.source for c in entry.supporting}))
+                if entry.settled else f"uncorroborated:{entry.status.value}"
+            )
+
+    fallback_title = info.get("track") or strip_noise(info.get("title") or "")
+    title = values.get("title") or fallback_title or "Unknown Title"
+    artist = values.get("artist") or info.get("artist") or info.get("uploader")
+    if "title" not in provenance:
+        provenance["title"] = "youtube"
+    if "artist" not in provenance and artist:
+        provenance["artist"] = "youtube"
+
     return Tags(
         title=title,
         artist=artist,
-        album=info.get("album"),
-        date=(info.get("release_year") and str(info["release_year"])) or None,
+        albumartist=artist,
+        album=values.get("album"),
+        date=values.get("date")
+        or (info.get("release_year") and str(info["release_year"])) or None,
         source_url=url,
-        provenance=fields,
+        provenance=provenance,
     )
 
 
@@ -345,10 +370,11 @@ def cmd_rip(args: argparse.Namespace) -> int:
 
         if wants_split and tracklist:
             return _emit_tracks(
-                staged, tracklist, result, decision, config, args, workdir
+                staged, tracklist, result, decision, config, args, workdir,
+                resolution,
             )
 
-        tags = _tags_from_youtube(result.info, args.url)
+        tags = _tags_from_resolution(resolution, result.info, args.url)
         cover = None
         thumbnail = fetch_thumbnail(args.url, workdir / "thumb")
         if thumbnail:
