@@ -221,9 +221,10 @@ LEXICON: list[tuple[re.Pattern[str], ContentClass, float]] = [
      ContentClass.SPEECH_DOMINANT, 3.5),
     (re.compile(r"\baftermovie\b|\brecap\b|\bhighlights\b|\btrailer\b", re.I),
      ContentClass.MONTAGE, 4.0),
-    (re.compile(r"\bdj[\s-]?set\b|\bboiler ?room\b|\bessential mix\b|\bb2b\b"
+    (re.compile(r"\bdj[\s-]?(set|mix)\b|\bboiler ?room\b|\bessential mix\b|\bb2b\b"
                 r"|\bmixed by\b|\bcontinuous mix\b|\bmegamix\b|\bmixtape\b"
-                r"|\ba state of trance\b|\bmainstage\b", re.I),
+                r"|\ba state of trance\b|\bmainstage\b|\blive ?set\b"
+                r"|\b(techno|trance|house|edm|drum ?& ?bass|dnb) mix\b", re.I),
      ContentClass.CONTINUOUS_MIX, 4.0),
     (re.compile(r"\bfull (concert|show|gig)\b|\blive concert\b|\bsetlist\b"
                 r"|\btiny desk\b|\bunplugged\b|\blive in concert\b", re.I),

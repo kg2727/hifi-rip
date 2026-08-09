@@ -72,14 +72,31 @@ def yt_dlp_path() -> str:
     return path
 
 
+#: How many comments to pull when tracklists are wanted. Top-sorted, so a
+#: community tracklist -- which is invariably among the most-upvoted comments
+#: on a DJ set -- surfaces well inside this. Fetching more costs real time on
+#: videos with six-figure comment counts and adds nothing.
+COMMENT_LIMIT = 120
+
+
 def build_command(
     url: str,
     *,
     cookies_from_browser: str | None = None,
     cookies_file: str | None = None,
+    with_comments: bool = False,
+    comment_limit: int = COMMENT_LIMIT,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
     cmd = [yt_dlp_path(), "-J", "--no-warnings", "--no-playlist"]
+    if with_comments:
+        # Top-level comments only, sorted by votes. Replies are conversation
+        # about a tracklist, never the tracklist itself.
+        cmd += [
+            "--write-comments",
+            "--extractor-args",
+            f"youtube:comment_sort=top;max_comments={comment_limit},{comment_limit},0,0",
+        ]
     if cookies_from_browser:
         cmd += ["--cookies-from-browser", cookies_from_browser]
     elif cookies_file:
@@ -94,14 +111,22 @@ def probe(
     *,
     cookies_from_browser: str | None = None,
     cookies_file: str | None = None,
+    with_comments: bool = False,
     timeout: int = DEFAULT_TIMEOUT,
     extra_args: Sequence[str] = (),
 ) -> ProbeResult:
-    """Fetch metadata and the audio-only stream list for `url`."""
+    """Fetch metadata and the audio-only stream list for `url`.
+
+    `with_comments` is off by default because it turns a fast metadata call
+    into a much slower one. It is worth paying only for multitrack content,
+    where fan-written tracklists are frequently the only timings in
+    existence -- and worthless for a four-minute single.
+    """
     cmd = build_command(
         url,
         cookies_from_browser=cookies_from_browser,
         cookies_file=cookies_file,
+        with_comments=with_comments,
         extra_args=extra_args,
     )
     try:

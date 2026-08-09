@@ -71,11 +71,21 @@ class Claim:
 # normalise to *compare*, never to decide what the user sees.
 # ---------------------------------------------------------------------------
 
-#: Suffixes uploaders append that say nothing about the recording's identity.
+#: Words that describe the *upload* rather than the recording. Deliberately
+#: excludes "live", "acoustic", "remix", "extended" and "radio edit": those
+#: identify a genuinely different recording, and stripping them would merge
+#: two distinct things into one.
+NOISE_WORD = (
+    r"(?:official|music|video|audio|lyrics?|hd|hq|uhd|[48]k|remaster(?:ed)?"
+    r"|visuali[sz]er|mv|explicit|clean|full\s*album|free\s*download|\d{4})"
+)
+
+#: Bracketed furniture, allowing several noise words in one bracket so that
+#: "(4K Remaster)" and "(Official Music Video HD)" come off whole. Matching a
+#: single word per bracket left the rest behind, and a release database holds
+#: no recording by that name.
 NOISE = re.compile(
-    r"\s*[\(\[\{]\s*(official\s*(music\s*)?video|official\s*audio|lyric\s*video"
-    r"|lyrics|hd|hq|4k|remaster(ed)?(\s*\d{4})?|audio|visualizer|mv"
-    r"|explicit|clean|full\s*album|free\s*download)\s*[\)\]\}]",
+    r"\s*[\(\[\{]\s*" + NOISE_WORD + r"(?:[\s\-,]+" + NOISE_WORD + r")*\s*[\)\]\}]",
     re.IGNORECASE,
 )
 
@@ -103,6 +113,18 @@ def normalise(value: str) -> str:
     text = PUNCTUATION.sub(" ", text)
     text = WHITESPACE.sub(" ", text)
     return text.strip().lower()
+
+
+def strip_noise(value: str) -> str:
+    """Remove uploader furniture while keeping the value human-readable.
+
+    `normalise` is for comparison and destroys case and punctuation, which
+    makes it useless as a search term. This keeps the title intact and only
+    drops the parts that describe the *upload* rather than the recording --
+    "(Official Video)", "[4K Remaster]" and so on. Searching a release
+    database for those verbatim reliably matches nothing.
+    """
+    return WHITESPACE.sub(" ", NOISE.sub(" ", value or "")).strip(" -–—|")
 
 
 def equivalent(left: str, right: str) -> bool:

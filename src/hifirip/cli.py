@@ -24,19 +24,84 @@ from .formats import NoUsableStream
 from .library import LibraryError, hand_off, place, render_path
 from .probe import ProbeError, probe
 from .resolve import resolution_matrix, resolve
+from .resolver import resolve as resolve_sources
+from .split import split
 from .tag import TagError, Tags, fetch_thumbnail, square_crop, write_tags
+from .tracklist import to_boundaries
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_DEGRADED = 2   # ran, but credentials failed and quality is capped
 
 
-def _probe(url: str, config) -> object:
+def _probe(url: str, config, *, with_comments: bool = False) -> object:
     return probe(
         url,
         cookies_from_browser=config.cookies_from_browser,
         cookies_file=config.cookies_file,
+        with_comments=with_comments,
     )
+
+
+def _emit_tracks(staged, tracklist, result, decision, config, args, workdir):
+    """Split a staged file into tracks, tag each, and file them."""
+    duration = float(result.info.get("duration") or 0.0)
+    boundaries = to_boundaries(tracklist, duration)
+    if not boundaries:
+        print("Tracklist produced no usable boundaries.", file=sys.stderr)
+        return EXIT_ERROR
+
+    outcome = split(staged, boundaries, workdir / "tracks",
+                    container=decision.stream.container)
+    print(outcome.report())
+
+    album = next(
+        (r.value for r in resolution_fields(result) if r.field == "album"), None
+    ) or result.info.get("title")
+
+    cover = None
+    thumbnail = fetch_thumbnail(args.url, workdir / "thumb")
+    if thumbnail:
+        try:
+            cover = square_crop(thumbnail, workdir / "cover.jpg").read_bytes()
+        except TagError:
+            cover = None
+
+    root = Path(args.output_dir) if args.output_dir else config.library_root
+    written = []
+    for index, (part, boundary) in enumerate(zip(outcome.parts, boundaries), start=1):
+        track = tracklist.tracks[min(index - 1, len(tracklist.tracks) - 1)]
+        artist = track.artist.value if track.artist else None
+        tags = Tags(
+            title=track.title.value or boundary.title,
+            artist=artist,
+            albumartist=result.info.get("uploader"),
+            album=album,
+            track=index,
+            track_total=len(boundaries),
+            source_url=args.url,
+            provenance={"tracklist": ",".join(sorted(track.supporting_sources))},
+        )
+        write_tags(part, tags, cover)
+        destination = render_path(config.naming, tags, decision.stream.container,
+                                  root, single_template=config.naming_single)
+        if args.dry_run:
+            print(f"  would write {destination}")
+        else:
+            written.append(place(part, destination))
+
+    if args.dry_run:
+        return EXIT_OK
+
+    print(f"\nWrote {len(written)} track(s) under {root}")
+    if not args.no_handoff and written:
+        print(hand_off(written[0].parent, detect()).report())
+    return EXIT_OK
+
+
+def resolution_fields(result):
+    """Metadata resolutions attached to a probe, if any were computed."""
+    return getattr(result, "_resolutions", [])
 
 
 def cmd_explain(args: argparse.Namespace) -> int:
@@ -231,15 +296,40 @@ def cmd_rip(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
-    if wants_split:
-        print(
-            "Splitting is not implemented yet; --no-split works today.",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
-
     print(decision.selection.explain())
     print()
+
+    # Comments are the highest-yield tracklist source for mixed material and
+    # frequently the only timings that exist, but fetching them turns a fast
+    # probe into a slow one. Pay that cost only when splitting.
+    if wants_split and classification.is_multitrack:
+        try:
+            result = _probe(args.url, config, with_comments=True)
+        except ProbeError:
+            pass  # Keep the comment-free probe; a slower source is optional.
+
+    resolution = resolve_sources(result.info, classification)
+    print(resolution.describe())
+    print()
+
+    tracklist = resolution.tracklist
+    if wants_split:
+        if not tracklist or not tracklist.tracks:
+            print(
+                "No source produced a tracklist for this upload, so there is "
+                "nothing to split on. Re-run with --no-split to keep it whole.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        if tracklist.needs_host and not args.accept_unverified:
+            print(tracklist.brief(), file=sys.stderr)
+            print(
+                "\nSplitting stopped: the tracklist is not corroborated. Settle "
+                "the tracks above, or pass --accept-unverified to split on the "
+                "leading candidates anyway.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
 
     workdir = Path(tempfile.mkdtemp(prefix="hifi-rip-"))
     try:
@@ -252,6 +342,11 @@ def cmd_rip(args: argparse.Namespace) -> int:
         staged = workdir / f"audio.{decision.stream.container}"
         rip = remux(source, staged)
         print(rip.report())
+
+        if wants_split and tracklist:
+            return _emit_tracks(
+                staged, tracklist, result, decision, config, args, workdir
+            )
 
         tags = _tags_from_youtube(result.info, args.url)
         cover = None
@@ -349,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="produce per-track files")
     split.add_argument("--no-split", dest="split", action="store_false",
                        help="keep the upload as one file")
+    rip.add_argument("--accept-unverified", action="store_true",
+                     help="split on an uncorroborated tracklist anyway")
     rip.add_argument("--dry-run", action="store_true",
                      help="show the destination and handoff without writing")
     rip.add_argument("--no-handoff", action="store_true",
