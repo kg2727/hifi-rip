@@ -1,0 +1,47 @@
+[
+  {
+    "video_id": "26DdFXsvOoM",
+    "title": "Lorna Shore - full set - Live in Madison (April 2026 concert) (with Po",
+    "source": "yt_chapters",
+    "label_from": [
+      "yt_comments",
+      "yt_description"
+    ],
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "residual": 0.0,
+    "predicted": 12,
+    "expected": 12
+  },
+  {
+    "video_id": "26DdFXsvOoM",
+    "title": "Lorna Shore - full set - Live in Madison (April 2026 concert) (with Po",
+    "source": "yt_description",
+    "label_from": [
+      "yt_chapters",
+      "yt_comments"
+    ],
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "residual": 0.0,
+    "predicted": 12,
+    "expected": 12
+  },
+  {
+    "video_id": "26DdFXsvOoM",
+    "title": "Lorna Shore - full set - Live in Madison (April 2026 concert) (with Po",
+    "source": "yt_comments",
+    "label_from": [
+      "yt_chapters",
+      "yt_description"
+    ],
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "residual": 0.0,
+    "predicted": 12,
+    "expected": 12
+  }
+]
