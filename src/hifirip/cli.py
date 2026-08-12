@@ -181,7 +181,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if not config.cookies_from_browser and not config.cookies_file:
         suggestion = cookies_mod.suggest_browser()
-        print("\nNo credentials configured, so 256k streams will never be offered.")
+        # "credentials" is overloaded: the API-key section above uses the same
+        # word for a different thing, and reporting "no credentials" directly
+        # beneath two keys marked `set` reads as a contradiction.
+        print("\nNo browser cookies configured (separate from the API keys "
+              "above),\nso 256k streams will never be offered.")
         if suggestion:
             print(f"  Set `cookies_from_browser = \"{suggestion}\"` in your config "
                   f"to use the cookies found above.")

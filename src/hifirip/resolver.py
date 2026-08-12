@@ -22,9 +22,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import keychain
 from .consensus import Claim, ConflictReport, reconcile_all, strip_noise
 from .content import Classification, ContentClass
 from .sources import REGISTRY, derivation_map, sources_for, unavailable_for
+from .sources import acoustid, discogs
 from .sources import musicbrainz as mb
 from .sources import silence as silence_mod
 from .sources import youtube as yt
@@ -39,25 +41,52 @@ MAX_WORKERS = 6
 SOURCE_TIMEOUT = 60
 
 
+def credential_origins(
+    environ: dict[str, str] | None = None,
+) -> dict[str, keychain.Resolved]:
+    """Where each credential comes from, without its value."""
+    env = environ if environ is not None else dict(os.environ)
+    return keychain.resolve_all(sorted(KEY_VARIABLES), env)
+
+
 def available_keys(environ: dict[str, str] | None = None) -> frozenset[str]:
-    """Names of the credential variables that are set.
+    """Names of the credential variables that resolve to a value.
 
     Returns variable *names*, never their values. Every caller -- routing,
     reporting, `doctor` -- needs only presence, so the value never leaves the
     environment and cannot be printed, logged, or serialised by accident.
+
+    The Keychain is consulted when the environment is silent, because shell
+    profiles reach some processes and not others: `.zshrc` only interactive
+    shells, `.zprofile` only login shells, and neither an editor-launched
+    tool nor a scheduled job. A key that is plainly configured and invisible
+    to the tool is the most confusing failure this project can produce.
     """
+    return frozenset(
+        variable for variable, resolved in credential_origins(environ).items()
+        if resolved.present
+    )
+
+
+def credential_value(
+    variable: str, environ: dict[str, str] | None = None
+) -> str | None:
+    """Fetch one credential for actual use. Never log the result."""
     env = environ if environ is not None else dict(os.environ)
-    return frozenset(name for name in KEY_VARIABLES if env.get(name))
+    value, _ = keychain.resolve(variable, env)
+    return value
 
 
 def describe_credentials(environ: dict[str, str] | None = None) -> str:
-    """Report which credentials are configured, and what each one unlocks.
+    """Report which credentials are configured, and where each came from.
 
-    Deliberately prints presence and nothing else. A diagnostic command that
-    echoes a secret is one screen-share or pasted bug report away from
-    leaking it, and users paste `doctor` output into issues constantly.
+    Prints presence and origin, never a value. A diagnostic that echoes a
+    secret is one screen-share or pasted bug report away from leaking it, and
+    `doctor` output gets pasted into issues constantly. The origin is worth
+    showing because "set, from keychain" and "set, from environment" fail in
+    completely different ways.
     """
-    present = available_keys(environ)
+    origins = credential_origins(environ)
     keyed = sorted(
         (spec for spec in REGISTRY.values() if spec.requires_key),
         key=lambda spec: -spec.weight,
@@ -65,12 +94,17 @@ def describe_credentials(environ: dict[str, str] | None = None) -> str:
 
     lines = []
     for spec in keyed:
-        state = "set" if spec.requires_key in present else "not set"
-        lines.append(f"  {spec.requires_key:16s} {state:8s} -> {spec.name}")
-    if not present:
+        resolved = origins.get(spec.requires_key)
+        if resolved and resolved.present:
+            state = f"set ({resolved.origin})"
+        else:
+            state = "not set"
+        lines.append(f"  {spec.requires_key:16s} {state:20s} -> {spec.name}")
+
+    if not any(r.present for r in origins.values()):
         lines.append(
-            "  No API credentials configured. Every keyless source still "
-            "works;\n  see docs/credentials.md for what each key adds."
+            "  No API credentials found in the environment or the Keychain.\n"
+            "  Every keyless source still works; see docs/credentials.md."
         )
     return "\n".join(lines)
 
@@ -169,6 +203,25 @@ def resolve(
             jobs[pool.submit(
                 mb.claims_for, title, artist, weight=weights["musicbrainz"]
             )] = "musicbrainz"
+
+        if "discogs" in active_names:
+            title, artist = _seed_from_youtube(info)
+            token = credential_value("DISCOGS_TOKEN", environ)
+            if token:
+                jobs[pool.submit(
+                    discogs.claims_for, title, artist,
+                    token=token, weight=weights["discogs"],
+                )] = "discogs"
+
+        # Fingerprinting needs the audio itself, so unlike every text source
+        # it can only run once something has been downloaded.
+        if "acoustid" in active_names and audio_path and audio_path.exists():
+            key = credential_value("ACOUSTID_KEY", environ)
+            if key and acoustid.fingerprinter_available():
+                jobs[pool.submit(
+                    acoustid.claims_for, audio_path, key,
+                    weight=weights["acoustid"],
+                )] = "acoustid"
 
         if "silence" in active_names and audio_path and audio_path.exists():
             jobs[pool.submit(silence_mod.detect_gaps, audio_path)] = "silence"

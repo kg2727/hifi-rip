@@ -54,9 +54,11 @@ class Recording:
     date: str | None
     length: float | None      # seconds
     score: int = 0
+    is_compilation: bool = False
 
     def __str__(self) -> str:
-        return f"{self.artist or '?'} - {self.title} ({self.score})"
+        kind = " [compilation]" if self.is_compilation else ""
+        return f"{self.artist or '?'} - {self.title} ({self.score}){kind}"
 
 
 #: Kept short. A slow MusicBrainz must not hold up a rip whose other sources
@@ -112,32 +114,36 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 #: Release groups that are not the recording's own album. A hit song appears
 #: on dozens of these, and they crowd out the original.
-COMPILATION_TYPES = {"compilation", "live", "soundtrack", "dj-mix", "mixtape/street"}
+COMPILATION_TYPES = {"compilation", "live", "soundtrack", "dj-mix", "mixtape/street",
+                     "remix", "interview"}
+
+#: Deliberately large. MusicBrainz stores a separate recording entity per
+#: master, so a well-known song has hundreds, and the search ranks them by
+#: text score -- which ties at 100 across all of them. A five-result page
+#: therefore returns an arbitrary handful: measured on a famous single, the
+#: top five were a millennium megamix, two other megamixes, a fitness
+#: compilation and a live album, with the original studio release absent
+#: entirely. Ranking releases cannot fix a page that never contains the
+#: right recording.
+SEARCH_LIMIT = 25
+
+
+def _is_compilation(release: dict) -> bool:
+    group = release.get("release-group") or {}
+    primary = (group.get("primary-type") or "").lower()
+    secondary = {t.lower() for t in group.get("secondary-types") or []}
+    return bool(secondary & COMPILATION_TYPES) or primary in COMPILATION_TYPES
+
+
+def _release_rank(release: dict) -> tuple[int, str]:
+    # Undated releases sort last: a missing date is not evidence of being
+    # early, and treating it as "0000" would beat every real album.
+    return (1 if _is_compilation(release) else 0, release.get("date") or "9999")
 
 
 def _original_release(releases: list[dict]) -> dict:
-    """Pick the release a recording actually belongs to.
-
-    MusicBrainz returns releases in no useful order, so taking the first
-    yields whichever compilation happens to be listed -- a well-known single
-    resolves to a themed party album rather than the record it came from.
-    Studio albums are preferred over compilations, and the earliest date
-    wins, which is nearly always the original issue.
-    """
-    if not releases:
-        return {}
-
-    def rank(release: dict) -> tuple[int, str]:
-        group = release.get("release-group") or {}
-        primary = (group.get("primary-type") or "").lower()
-        secondary = {t.lower() for t in group.get("secondary-types") or []}
-        is_compilation = bool(secondary & COMPILATION_TYPES) or primary in COMPILATION_TYPES
-        # Undated releases sort last: a missing date is not evidence of being
-        # early, and treating it as "0000" would beat every real album.
-        date = release.get("date") or "9999"
-        return (1 if is_compilation else 0, date)
-
-    return min(releases, key=rank)
+    """Pick the release a recording actually belongs to."""
+    return min(releases, key=_release_rank) if releases else {}
 
 
 def _clean_query(text: str) -> str:
@@ -153,7 +159,7 @@ def search_recording(
     title: str,
     artist: str | None = None,
     *,
-    limit: int = 5,
+    limit: int = SEARCH_LIMIT,
     client: httpx.Client | None = None,
 ) -> list[Recording]:
     """Find recordings matching a title, optionally narrowed by artist."""
@@ -176,7 +182,8 @@ def search_recording(
             continue
         credits = item.get("artist-credit") or []
         artist_name = credits[0].get("name") if credits else None
-        release = _original_release(item.get("releases") or [])
+        releases = item.get("releases") or []
+        release = _original_release(releases)
         length = item.get("length")
         recordings.append(Recording(
             mbid=item.get("id", ""),
@@ -186,8 +193,31 @@ def search_recording(
             date=(release.get("date") or "")[:4] or None,
             length=length / 1000 if length else None,
             score=score,
+            is_compilation=_is_compilation(release) if release else False,
         ))
     return recordings
+
+
+def best_candidate(recordings: list[Recording]) -> Recording | None:
+    """Choose across candidates, not within one.
+
+    Text score is useless for ranking here: every plausible match ties at
+    100, so `max(score)` returns whichever entity the server listed first.
+    What distinguishes them is what they appear *on* -- a recording whose
+    only release is a themed megamix is the same song, but it is not the
+    canonical one, and filing a library under it is wrong in a way the user
+    will notice.
+    """
+    if not recordings:
+        return None
+    return min(
+        recordings,
+        key=lambda r: (
+            1 if r.is_compilation else 0,
+            r.date or "9999",
+            -r.score,
+        ),
+    )
 
 
 def lookup_release(mbid: str, *, client: httpx.Client | None = None) -> dict:
@@ -224,21 +254,22 @@ def claims_for(
     if not results:
         return []
 
-    best = max(results, key=lambda r: r.score)
+    best = best_candidate(results)
+    if not best:
+        return []
     detail = f"MBID {best.mbid}, search score {best.score}"
 
     claims = [Claim("title", best.title, "musicbrainz", weight, detail)]
     if best.artist:
         claims.append(Claim("artist", best.artist, "musicbrainz", weight, detail))
 
-    # Resolve the album properly rather than trusting the search payload.
-    release = lookup_release(best.mbid, client=client) or {}
-    album = release.get("title") or best.release
-    date = (release.get("date") or "")[:4] or best.date
-    if album:
-        claims.append(Claim("album", album, "musicbrainz", weight, detail))
-    if date:
-        claims.append(Claim("date", date, "musicbrainz", weight, detail))
+    # The album is only claimed when it is a real one. A compilation title is
+    # worse than no album at all: it is confidently wrong, and it becomes a
+    # folder name in the user's library.
+    if best.release and not best.is_compilation:
+        claims.append(Claim("album", best.release, "musicbrainz", weight, detail))
+        if best.date:
+            claims.append(Claim("date", best.date, "musicbrainz", weight, detail))
     return claims
 
 
