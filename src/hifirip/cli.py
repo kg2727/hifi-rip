@@ -9,6 +9,7 @@ rather than hidden behind a Python API.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import tempfile
@@ -24,8 +25,9 @@ from .environment import detect
 from .formats import NoUsableStream
 from .library import LibraryError, hand_off, place, render_path
 from .probe import ProbeError, probe
+from .resilience import health as breaker_health
 from .resolve import resolution_matrix, resolve
-from .resolver import describe_credentials
+from .resolver import credential_origins, describe_credentials
 from .resolver import resolve as resolve_sources
 from .split import split
 from .tag import TagError, Tags, fetch_thumbnail, square_crop, write_tags
@@ -140,9 +142,49 @@ def cmd_explain(args: argparse.Namespace) -> int:
     return EXIT_DEGRADED if decision.entitlement.silently_downgraded else EXIT_OK
 
 
+def _health_snapshot(config) -> dict:
+    """Machine-readable health, for scheduled checks and dashboards.
+
+    Deliberately carries no credential values -- only whether each is present
+    and where it came from -- so the output is safe to log, ship to a
+    monitor, or paste into an issue.
+    """
+    return {
+        "dependencies": {
+            tool: bool(shutil.which(tool)) for tool in ("yt-dlp", "ffmpeg", "ffprobe")
+        },
+        "environment": {
+            "host": detect().host.value,
+            "profile": detect().profile,
+            "handoff": detect().handoff.value,
+        },
+        "cookies": {
+            "configured": bool(config.cookies_from_browser or config.cookies_file),
+            "usable_browser": cookies_mod.suggest_browser(),
+            "blocked_browsers": [b.name for b in cookies_mod.blocked_browsers()],
+        },
+        "credentials": {
+            name: resolved.origin
+            for name, resolved in credential_origins().items()
+        },
+        "source_health": breaker_health(),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     config = load(overrides=_overrides(args))
     status = EXIT_OK
+
+    if getattr(args, "json", False):
+        snapshot = _health_snapshot(config)
+        degraded = (
+            not all(snapshot["dependencies"].values())
+            or snapshot["cookies"]["blocked_browsers"]
+            or any(v != "ok" for v in snapshot["source_health"].values())
+        )
+        snapshot["status"] = "degraded" if degraded else "ok"
+        print(json.dumps(snapshot, indent=2))
+        return EXIT_DEGRADED if degraded else EXIT_OK
 
     print("=== dependencies ===")
     for tool in ("yt-dlp", "ffmpeg"):
@@ -171,6 +213,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print("\n=== api credentials ===")
     print(describe_credentials())
+
+    statuses = breaker_health()
+    if statuses:
+        print("\n=== source health ===")
+        for name, state in statuses.items():
+            print(f"  {name:16s} {state}")
+        if any(state != "ok" for state in statuses.values()):
+            status = EXIT_DEGRADED
 
     if config.cookies_file:
         print("\n=== cookie file ===")
@@ -453,6 +503,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="check dependencies and credentials")
     doctor.add_argument("url", nargs="?", help="a known YouTube Music track URL")
+    doctor.add_argument("--json", action="store_true",
+                        help="machine-readable health snapshot for monitoring")
     add_common(doctor)
     doctor.set_defaults(func=cmd_doctor)
 

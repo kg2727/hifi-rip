@@ -25,6 +25,7 @@ from pathlib import Path
 from . import keychain
 from .consensus import Claim, ConflictReport, reconcile_all, strip_noise
 from .content import Classification, ContentClass
+from .resilience import breaker_for
 from .sources import REGISTRY, derivation_map, sources_for, unavailable_for
 from .sources import acoustid, discogs, tracklists1001
 from .sources import musicbrainz as mb
@@ -118,6 +119,8 @@ class Resolution:
     consulted: list[str] = field(default_factory=list)
     silent: list[str] = field(default_factory=list)
     inactive: list[str] = field(default_factory=list)
+    #: Sources skipped because their breaker is open.
+    circuit_open: list[str] = field(default_factory=list)
     elapsed: float = 0.0
 
     @property
@@ -125,6 +128,40 @@ class Resolution:
         return self.metadata.needs_host or bool(
             self.tracklist and self.tracklist.needs_host
         )
+
+    @property
+    def corroboration(self) -> float:
+        """Share of resolved fields that two independent sources agreed on.
+
+        The health signal worth watching over time. When a source silently
+        starts returning junk -- as AcoustID did while returning a confident
+        0.98 score and no metadata -- nothing errors and nothing looks wrong;
+        this number just falls. Tracked across a batch it is the difference
+        between noticing in an hour and noticing in a month.
+        """
+        resolutions = self.metadata.resolutions
+        if not resolutions:
+            return 0.0
+        return round(len(self.metadata.settled) / len(resolutions), 3)
+
+    def metrics(self) -> dict[str, object]:
+        """Machine-readable summary, for batch reports and health checks."""
+        return {
+            "elapsed_seconds": self.elapsed,
+            "sources_consulted": sorted(self.consulted),
+            "sources_silent": sorted(self.silent),
+            "sources_inactive": sorted(self.inactive),
+            "sources_circuit_open": sorted(self.circuit_open),
+            "fields_total": len(self.metadata.resolutions),
+            "fields_settled": len(self.metadata.settled),
+            "corroboration": self.corroboration,
+            "needs_host": self.needs_host,
+            "tracks_found": len(self.tracklist.tracks) if self.tracklist else 0,
+            "tracks_corroborated": (
+                len(self.tracklist.tracks) - len(self.tracklist.unresolved)
+                if self.tracklist else 0
+            ),
+        }
 
     def describe(self) -> str:
         lines = [
@@ -136,6 +173,10 @@ class Resolution:
         if self.inactive:
             lines.append(
                 f"  inactive for want of credentials: {', '.join(self.inactive)}"
+            )
+        if self.circuit_open:
+            lines.append(
+                f"  skipped, recently failing: {', '.join(self.circuit_open)}"
             )
         for resolution in self.metadata.resolutions:
             lines.append(f"  {resolution.describe()}")
@@ -196,9 +237,24 @@ def resolve(
             contributions[name] = entries
             consulted.append(name)
 
+    circuit_open: list[str] = []
+
+    def gated(name: str) -> bool:
+        """Whether to attempt a source, honouring its breaker.
+
+        A source that has failed repeatedly is skipped for a cooldown rather
+        than retried per item. During development a rate-limited MusicBrainz
+        cost a full timeout on every lookup; across a batch that is one
+        timeout per upload for a service already known to be refusing us.
+        """
+        if breaker_for(name).allows():
+            return True
+        circuit_open.append(name)
+        return False
+
     jobs = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        if "musicbrainz" in active_names:
+        if "musicbrainz" in active_names and gated("musicbrainz"):
             title, artist = _seed_from_youtube(info)
             jobs[pool.submit(
                 mb.claims_for, title, artist, weight=weights["musicbrainz"]
@@ -207,12 +263,14 @@ def resolve(
         # Community DJ-set tracklists. Scoped to mixes by the registry, and
         # slow by design (one request per five seconds, cached on disk), so
         # it is only worth asking when there is a set to identify.
-        if "1001tracklists" in active_names and tracklists1001.parser_available():
+        if ("1001tracklists" in active_names
+                and tracklists1001.parser_available()
+                and gated("1001tracklists")):
             query = strip_noise(info.get("title") or "")
             if query:
                 jobs[pool.submit(tracklists1001.candidates_for, query)] = "1001tracklists"
 
-        if "discogs" in active_names:
+        if "discogs" in active_names and gated("discogs"):
             title, artist = _seed_from_youtube(info)
             token = credential_value("DISCOGS_TOKEN", environ)
             if token:
@@ -223,7 +281,8 @@ def resolve(
 
         # Fingerprinting needs the audio itself, so unlike every text source
         # it can only run once something has been downloaded.
-        if "acoustid" in active_names and audio_path and audio_path.exists():
+        if ("acoustid" in active_names and audio_path
+                and audio_path.exists() and gated("acoustid")):
             key = credential_value("ACOUSTID_KEY", environ)
             if key and acoustid.fingerprinter_available():
                 jobs[pool.submit(
@@ -238,9 +297,13 @@ def resolve(
             name = jobs[future]
             try:
                 outcome = future.result(timeout=SOURCE_TIMEOUT)
-            except Exception:
-                # A source that fails is absent, never fatal.
+            except Exception as exc:
+                # A source that fails is absent, never fatal -- but the
+                # failure is remembered, so a service that is down stops
+                # being asked once per item.
+                breaker_for(name).record_failure(str(exc))
                 continue
+            breaker_for(name).record_success()
             if not outcome:
                 continue
             consulted.append(name)
@@ -295,5 +358,6 @@ def resolve(
         consulted=sorted(set(consulted)),
         silent=sorted(active_names - set(consulted)),
         inactive=[s.name for s in unavailable_for(content_class, available_keys=keys)],
+        circuit_open=sorted(set(circuit_open)),
         elapsed=round(time.monotonic() - started, 2),
     )

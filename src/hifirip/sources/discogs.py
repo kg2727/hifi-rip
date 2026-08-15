@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import httpx
 
 from ..consensus import Claim, normalise
+from ..resilience import DiskCache
 
 API_ROOT = "https://api.discogs.com"
 USER_AGENT = "hifi-rip/0.1.0 +https://github.com/kg2727/hifi-rip"
@@ -69,7 +70,21 @@ class Release:
         return f"{self.title} ({self.year or '?'})"
 
 
+_cache = DiskCache("discogs")
+
+
 def _get(
+    path: str, params: dict, token: str, *, client: httpx.Client | None = None
+) -> dict:
+    # The token is deliberately excluded from the cache key: it is a secret,
+    # and the response does not vary by which valid token asked.
+    key = f"{path}?{sorted(params.items())}"
+    return _cache.fetch(
+        key, lambda: _get_uncached(path, params, token, client=client)
+    )
+
+
+def _get_uncached(
     path: str, params: dict, token: str, *, client: httpx.Client | None = None
 ) -> dict:
     """One request, retried once on explicit rate limiting.

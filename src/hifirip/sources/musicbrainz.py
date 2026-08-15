@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import httpx
 
 from ..consensus import Claim, normalise
+from ..resilience import DiskCache
 
 API_ROOT = "https://musicbrainz.org/ws/2"
 USER_AGENT = "hifi-rip/0.1.0 (https://github.com/kg2727/hifi-rip)"
@@ -67,7 +68,20 @@ REQUEST_TIMEOUT = 8.0
 MAX_ATTEMPTS = 2
 
 
+#: Release metadata is effectively static, so a long TTL is safe and every
+#: cache hit is a request this project does not make against a service that
+#: rate-limits hard.
+_cache = DiskCache("musicbrainz")
+
+
 def _get(path: str, params: dict, *, client: httpx.Client | None = None) -> dict:
+    key = f"{path}?{sorted(params.items())}"
+    return _cache.fetch(key, lambda: _get_uncached(path, params, client=client))
+
+
+def _get_uncached(
+    path: str, params: dict, *, client: httpx.Client | None = None
+) -> dict:
     """One request, with a single polite retry on explicit rate limiting.
 
     MusicBrainz answers a client that exceeds its limit with 503 and a
