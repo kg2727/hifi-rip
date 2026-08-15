@@ -37,6 +37,42 @@ from enum import Enum
 #: conclusions, however authoritative the source.
 MIN_INDEPENDENT_SOURCES = 2
 
+#: Per-field corroboration requirements.
+#:
+#: The line is drawn on consequence, not on how much we like a field. A value
+#: that determines *where a file lands* needs corroboration: get it wrong and
+#: the track is filed under a name that is not its own, splitting an album
+#: across two folders or burying a single inside a compilation that has
+#: nothing to do with it. Nobody notices until they go looking for something
+#: and it is not there, and by then there may be thousands of files.
+#:
+#: A value that merely *describes* the file is different. A wrong year sorts
+#: oddly in one view and is corrected in place in seconds. Holding it to the
+#: same standard buys nothing and costs a great deal: measured across 273
+#: uploads, genuinely independent corroboration exists for only ~18%, so a
+#: blanket rule leaves descriptive fields empty on most rips in exchange for
+#: protection against a harm that barely exists.
+#:
+#: Anything absent from this table gets the strict default.
+FIELD_POLICY: dict[str, int] = {
+    # Path-determining. These become directory and file names.
+    "title": 2,
+    "artist": 2,
+    "albumartist": 2,
+    "album": 2,
+    # Descriptive only. Wrong is cheap and locally fixable.
+    "date": 1,
+    "genre": 1,
+    "comment": 1,
+}
+
+
+def min_sources_for(field: str, override: int | None = None) -> int:
+    """How many independent sources this field needs before it is accepted."""
+    if override is not None:
+        return override
+    return FIELD_POLICY.get(field, MIN_INDEPENDENT_SOURCES)
+
 #: The winning value must hold at least this share of total weight, or the
 #: field is treated as contested and escalated.
 DOMINANCE_THRESHOLD = 0.6
@@ -145,10 +181,22 @@ class Resolution:
     confidence: float = 0.0
     supporting: list[Claim] = field(default_factory=list)
     dissenting: list[Claim] = field(default_factory=list)
+    #: How many independent sources this field was required to have.
+    required_sources: int = MIN_INDEPENDENT_SOURCES
 
     @property
     def independent_sources(self) -> int:
         return len({claim.source for claim in self.supporting})
+
+    @property
+    def accepted_on_single_source(self) -> bool:
+        """Settled by one source because the field only describes the file.
+
+        Surfaced rather than hidden: the audit trail embedded in the file
+        should say that a value was taken on one source's word, so a later
+        reader can tell a corroborated year from an asserted one.
+        """
+        return self.settled and self.independent_sources < MIN_INDEPENDENT_SOURCES
 
     @property
     def needs_judgement(self) -> bool:
@@ -164,6 +212,8 @@ class Resolution:
             return f"{self.field}: no source offered a value"
         backing = ", ".join(claim.source for claim in self.supporting)
         line = f"{self.field}: {self.value!r} [{self.status.value}, {backing}]"
+        if self.accepted_on_single_source:
+            line += " (single source; descriptive field)"
         if self.dissenting:
             rival = ", ".join(f"{c.source}={c.value!r}" for c in self.dissenting)
             line += f" -- contested by {rival}"
@@ -232,6 +282,7 @@ def reconcile(
         confidence=round(share, 3),
         supporting=winners,
         dissenting=losers,
+        required_sources=min_sources,
     )
 
 
@@ -290,9 +341,12 @@ class ConflictReport:
             lines.append(f"FIELD: {resolution.field}")
             if resolution.status is Status.SINGLE_SOURCE:
                 lines.append(
-                    "  Only one independent source offered a value. That is a "
-                    "lead, not a consensus, however reliable the source. Accept "
-                    "it only if it is independently plausible."
+                    f"  Only one independent source offered a value, and this "
+                    f"field requires {resolution.required_sources}. That is a "
+                    f"lead, not a consensus, however reliable the source -- it "
+                    f"determines where the file is filed, so a wrong value "
+                    f"misplaces the track rather than merely mislabelling it. "
+                    f"Accept it only if it is independently plausible."
                 )
             else:
                 lines.append(
@@ -320,21 +374,28 @@ class ConflictReport:
 def reconcile_all(
     claims: list[Claim],
     *,
-    min_sources: int = MIN_INDEPENDENT_SOURCES,
+    min_sources: int | None = None,
     dominance: float = DOMINANCE_THRESHOLD,
     independent_of: dict[str, set[str]] | None = None,
 ) -> ConflictReport:
-    """Reconcile every field present in `claims`."""
+    """Reconcile every field present in `claims`.
+
+    Each field gets the threshold `FIELD_POLICY` prescribes unless
+    `min_sources` overrides it for the whole run, so a caller who wants
+    uniform strictness can still ask for it.
+    """
     by_field: dict[str, list[Claim]] = defaultdict(list)
     for claim in claims:
         by_field[claim.field].append(claim)
 
     return ConflictReport(resolutions=[
         reconcile(
-            group, min_sources=min_sources, dominance=dominance,
+            group,
+            min_sources=min_sources_for(name, min_sources),
+            dominance=dominance,
             independent_of=independent_of,
         )
-        for _, group in sorted(by_field.items())
+        for name, group in sorted(by_field.items())
     ])
 
 

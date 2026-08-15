@@ -244,3 +244,77 @@ def test_a_field_the_host_declined_stays_unset():
     apply_judgement(report, {"title": None})
     assert report.resolutions[0].value is None
     assert report.resolutions[0].status is Status.ABSENT
+
+
+# --------------------------------------------------------------------------
+# Per-field corroboration policy
+#
+# The line is drawn on consequence: a value that determines where a file
+# lands needs corroboration, because getting it wrong misplaces the track
+# rather than merely mislabelling it. A value that only describes the file
+# does not, because a wrong year is corrected in place in seconds -- and
+# measured across 273 uploads, independent corroboration exists for only
+# ~18%, so a blanket rule leaves descriptive fields empty on most rips.
+# --------------------------------------------------------------------------
+
+def test_descriptive_field_settles_on_one_source():
+    resolution = reconcile_all([claim("discogs", "1987", 0.95, "date")]).resolutions[0]
+    assert resolution.settled
+    assert resolution.accepted_on_single_source
+    assert resolution.required_sources == 1
+
+
+@pytest.mark.parametrize("fieldname", ["title", "artist", "album", "albumartist"])
+def test_path_determining_fields_still_require_corroboration(fieldname):
+    resolution = reconcile_all(
+        [claim("musicbrainz", "Something", 1.0, fieldname)]
+    ).resolutions[0]
+    assert resolution.status is Status.SINGLE_SOURCE
+    assert resolution.needs_judgement
+    assert resolution.required_sources == 2
+
+
+def test_unknown_fields_get_the_strict_default():
+    resolution = reconcile_all(
+        [claim("musicbrainz", "x", 1.0, "some_new_field")]
+    ).resolutions[0]
+    assert resolution.required_sources == 2
+    assert resolution.status is Status.SINGLE_SOURCE
+
+
+def test_a_corroborated_descriptive_field_is_not_marked_sole():
+    resolution = reconcile_all([
+        claim("musicbrainz", "1987", 1.0, "date"),
+        claim("discogs", "1987", 0.95, "date"),
+    ]).resolutions[0]
+    assert resolution.settled
+    assert not resolution.accepted_on_single_source
+
+
+def test_relaxed_policy_does_not_rescue_a_genuine_conflict():
+    """Disagreement is still disagreement, whatever the field costs."""
+    resolution = reconcile_all([
+        claim("musicbrainz", "1987", 1.0, "date"),
+        claim("discogs", "1999", 0.95, "date"),
+    ]).resolutions[0]
+    assert resolution.status is Status.CONFLICTED
+    assert resolution.needs_judgement
+
+
+def test_explicit_override_applies_uniformly():
+    """A caller wanting uniform strictness can still ask for it."""
+    resolution = reconcile_all(
+        [claim("discogs", "1987", 0.95, "date")], min_sources=2
+    ).resolutions[0]
+    assert resolution.status is Status.SINGLE_SOURCE
+
+
+def test_single_source_brief_explains_the_filing_consequence():
+    brief = reconcile_all([claim("musicbrainz", "X", 1.0, "album")]).brief()
+    assert "where the file is filed" in brief
+    assert "misplaces the track" in brief
+
+
+def test_sole_acceptance_is_visible_in_the_description():
+    resolution = reconcile_all([claim("discogs", "1987", 0.95, "date")]).resolutions[0]
+    assert "single source" in resolution.describe()

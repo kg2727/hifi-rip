@@ -300,10 +300,16 @@ def _tags_from_resolution(resolution, info: dict, url: str) -> Tags:
     for entry in resolution.metadata.resolutions:
         if entry.value:
             values[entry.field] = entry.value
-            provenance[entry.field] = (
-                ",".join(sorted({c.source for c in entry.supporting}))
-                if entry.settled else f"uncorroborated:{entry.status.value}"
-            )
+            sources = ",".join(sorted({c.source for c in entry.supporting}))
+            if not entry.settled:
+                provenance[entry.field] = f"uncorroborated:{entry.status.value}"
+            elif entry.accepted_on_single_source:
+                # Descriptive fields settle on one source by policy. The file
+                # should still say so, or a later reader cannot tell a
+                # corroborated year from an asserted one.
+                provenance[entry.field] = f"{sources}(sole)"
+            else:
+                provenance[entry.field] = sources
 
     fallback_title = info.get("track") or strip_noise(info.get("title") or "")
     title = values.get("title") or fallback_title or "Unknown Title"
