@@ -1,0 +1,23 @@
+# Secret scanning before anything reaches a commit.
+#
+# The project reads API keys from the environment and has no config field
+# that can hold one, so a key should never be near a tracked file. This is
+# insurance against the ways that stops being true: a key pasted into a test
+# fixture, left in a debug print, or captured in recorded HTTP output.
+#
+# Install once:  pipx install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+        name: scan staged changes for secrets
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
