@@ -62,6 +62,28 @@ TIE_TOLERANCE = 0.05
 
 
 @dataclass
+class Pair:
+    """Two sources describing the same upload, scored against each other.
+
+    Leave-one-out needs three sources so that holding one out still leaves
+    two to agree on a label. Measured across 273 album uploads: 14% carry
+    three, 33% carry two, and 53% carry fewer than two. So leave-one-out is
+    possible but thin, and pairwise agreement uses the data that exists.
+
+    It cannot say which of two disagreeing sources is right. A source that
+    disagrees with every partner across many uploads is the likely outlier,
+    which is the ordering the weights encode.
+    """
+
+    video_id: str
+    title: str
+    a: str
+    b: str
+    f1: float = 0.0
+    residual: float = 0.0
+
+
+@dataclass
 class Trial:
     video_id: str
     title: str
@@ -106,6 +128,59 @@ def consensus_boundaries(
     return sorted(boundaries), sorted(others)
 
 
+def pairs_for(
+    contributions, tolerance: float, video_id: str, title: str
+) -> list[Pair]:
+    """Score every pair of sources on this upload against each other."""
+    names = sorted(contributions)
+    found: list[Pair] = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            expected = [c.start for c in contributions[b]]
+            predicted = [c.start for c in contributions[a]]
+            if not expected or not predicted:
+                continue
+            score = score_boundaries(predicted, expected, tolerance)
+            found.append(Pair(
+                video_id=video_id, title=title, a=a, b=b,
+                f1=round(score.f1, 3),
+                residual=round(score.median_residual, 2),
+            ))
+    return found
+
+
+def survey_for(url: str, cookies: str | None):
+    """Return (status, source_count, pairs) for one upload.
+
+    `status` distinguishes the three ways this returns nothing, because
+    collapsing them is how a broken run produces a confident conclusion. An
+    earlier version returned None for all three: every probe in a 273-upload
+    run failed on an unreadable cookie store, each failure was counted as
+    "this upload has no tracklist sources", and the empty result was reported
+    as a property of the data rather than of the credentials.
+    """
+    try:
+        result = probe(url, cookies_from_browser=cookies, with_comments=True)
+    except ProbeError as exc:
+        return f"probe-failed: {str(exc).strip().splitlines()[-1][:80]}", None, []
+
+    duration = float(result.info.get("duration") or 0.0)
+    if duration / 60 < MULTITRACK_MINUTES:
+        return "too-short", None, []
+
+    classification = classify(result.info)
+    if classification.needs_escalation:
+        classification = apply_host_decision(
+            classification, ContentClass.CONTINUOUS_MIX, "agreement survey"
+        )
+    tolerance = TOLERANCE.get(classification.content_class, 10.0)
+    contributions = yt.collect(result.info)
+    return "ok", len(contributions), pairs_for(
+        contributions, tolerance,
+        result.info.get("id", ""), (result.title or "")[:70],
+    )
+
+
 def trials_for(url: str, cookies: str | None) -> list[Trial]:
     try:
         result = probe(url, cookies_from_browser=cookies, with_comments=True)
@@ -148,6 +223,81 @@ def trials_for(url: str, cookies: str | None) -> list[Trial]:
             expected=len(expected),
         ))
     return trials
+
+
+def summarise_pairs(counts: list[int], pairs: list[Pair],
+                    statuses: list[str] | None = None) -> str:
+    from collections import Counter, defaultdict
+
+    lines = []
+    statuses = statuses or []
+    failures = [s for s in statuses if s.startswith("probe-failed")]
+    if failures:
+        rate = len(failures) / len(statuses)
+        lines += [
+            "=" * 74,
+            f"!! {len(failures)}/{len(statuses)} probes FAILED ({rate:.0%})",
+            "=" * 74,
+            f"   example: {failures[0][:150]}",
+        ]
+        if rate > 0.2:
+            lines.append(
+                "\n   Refusing to draw conclusions. A failed probe is missing\n"
+                "   data, not evidence of absent sources, and reporting it as\n"
+                "   the latter turns a credential problem into a finding about\n"
+                "   the world. Fix the failures and re-run."
+            )
+            return "\n".join(lines)
+        lines.append("")
+
+    lines += ["=" * 74, "SOURCE AVAILABILITY", "=" * 74]
+    histogram = Counter(counts)
+    total = len(counts)
+    for n in sorted(histogram):
+        share = histogram[n] / total if total else 0
+        lines.append(f"  {n} source(s): {histogram[n]:4d} uploads ({share:.0%})")
+    enough = sum(v for k, v in histogram.items() if k >= 2)
+    lines.append(
+        f"\n  Corroboration possible at all (2+ sources): {enough}/{total} "
+        f"({enough / total:.0%} of uploads)" if total else ""
+    )
+    lines.append(
+        "  This is the ceiling on the no-single-source rule: where fewer than\n"
+        "  two sources exist, every field must escalate no matter how good\n"
+        "  the resolver is."
+    )
+
+    if not pairs:
+        lines.append("\nNo pairs to score.")
+        return "\n".join(lines)
+
+    lines += ["", "=" * 74, "PAIRWISE AGREEMENT", "=" * 74,
+              f"{'pair':38s} {'n':>4s} {'F1':>6s} {'resid':>7s}"]
+    grouped = defaultdict(list)
+    for pair in pairs:
+        grouped[(pair.a, pair.b)].append(pair)
+    for (a, b), group in sorted(grouped.items()):
+        mean = sum(p.f1 for p in group) / len(group)
+        resid = sum(p.residual for p in group) / len(group)
+        lines.append(f"{a + ' vs ' + b:38s} {len(group):4d} {mean:6.2f} {resid:7.2f}")
+
+    per_source = defaultdict(list)
+    for pair in pairs:
+        per_source[pair.a].append(pair.f1)
+        per_source[pair.b].append(pair.f1)
+    lines += ["", f"{'source':18s} {'pairings':>9s} {'assigned':>9s} {'mean agree':>11s}"]
+    for name, scores in sorted(per_source.items()):
+        assigned = REGISTRY[name].weight if name in REGISTRY else 0.0
+        lines.append(
+            f"{name:18s} {len(scores):9d} {assigned:9.2f} "
+            f"{sum(scores) / len(scores):11.2f}"
+        )
+    lines.append(
+        "\nPairwise agreement cannot say which of two disagreeing sources is\n"
+        "right. A source that disagrees with every partner across many\n"
+        "uploads is the likely outlier, which is what the weights encode."
+    )
+    return "\n".join(lines)
 
 
 def summarise(trials: list[Trial]) -> str:
@@ -229,7 +379,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", type=Path)
     parser.add_argument("--out", type=Path, default=Path("data/weights.json"))
-    parser.add_argument("--cookies-from-browser", default="safari")
+    # No default: an unreadable cookie store fails every probe, and the
+    # analysis then reports a credential problem as a finding.
+    parser.add_argument("--cookies-from-browser", default=None)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
 
@@ -239,21 +391,30 @@ def main() -> int:
     if args.limit:
         urls = urls[: args.limit]
 
-    print(f"Validating weights across {len(urls)} link(s)...", file=sys.stderr)
-    trials: list[Trial] = []
+    print(f"Measuring agreement across {len(urls)} link(s)...", file=sys.stderr)
+    counts: list[int] = []
+    pairs: list[Pair] = []
+    statuses: list[str] = []
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
         futures = {}
         for url in urls:
-            futures[pool.submit(trials_for, url, args.cookies_from_browser)] = url
+            futures[pool.submit(survey_for, url, args.cookies_from_browser)] = url
             time.sleep(THROTTLE)
         for index, future in enumerate(as_completed(futures), start=1):
-            found = future.result()
-            trials.extend(found)
-            print(f"  [{index:2d}/{len(urls)}] {len(found)} trial(s)", file=sys.stderr)
+            status, count, found = future.result()
+            statuses.append(status)
+            if count is not None:
+                counts.append(count)
+            pairs.extend(found)
+            print(f"  [{index:3d}/{len(urls)}] {status[:40]:42s} "
+                  f"sources={count} pairs={len(found)}", file=sys.stderr)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps([t.__dict__ for t in trials], indent=2))
-    print(summarise(trials))
+    args.out.write_text(json.dumps(
+        {"source_counts": counts, "statuses": statuses,
+         "pairs": [p.__dict__ for p in pairs]}, indent=2
+    ))
+    print(summarise_pairs(counts, pairs, statuses))
     return 0
 
 

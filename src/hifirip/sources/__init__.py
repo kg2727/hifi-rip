@@ -125,6 +125,15 @@ REGISTRY: dict[str, SourceSpec] = {
             "about a quarter of multitrack uploads, and absent entirely from "
             "DJ sets in the survey sample."
         ),
+        # Measured, not assumed: across 117 uploads carrying both, chapters
+        # and description timestamps agreed at F1 1.00 with zero residual.
+        # Perfect agreement between two supposedly independent sources is not
+        # corroboration, it is one source counted twice -- YouTube generates
+        # chapters *from* description timestamps when the description carries
+        # a list starting at 0:00. Treating them as independent inflated the
+        # apparent corroboration rate on exactly the uploads where tracklists
+        # are easiest to find.
+        derives_from=frozenset({"yt_description"}),
     ),
     "sponsorblock": SourceSpec(
         name="sponsorblock", kind=Kind.SEGMENTS, weight=0.70,
