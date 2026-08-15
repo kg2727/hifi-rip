@@ -11,10 +11,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The 1001Tracklists source parses HTML, since the site has no API. Kept
+# optional so a default install carries no scraping dependency; the source
+# reports itself unavailable rather than failing a rip when absent.
+scrape = ["beautifulsoup4>=4.12"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "respx>=0.21",     # offline HTTP fixtures for deterministic CI
+    "beautifulsoup4>=4.12",
 ]
 
 [project.scripts]

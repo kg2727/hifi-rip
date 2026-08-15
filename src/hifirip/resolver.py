@@ -26,7 +26,7 @@ from . import keychain
 from .consensus import Claim, ConflictReport, reconcile_all, strip_noise
 from .content import Classification, ContentClass
 from .sources import REGISTRY, derivation_map, sources_for, unavailable_for
-from .sources import acoustid, discogs
+from .sources import acoustid, discogs, tracklists1001
 from .sources import musicbrainz as mb
 from .sources import silence as silence_mod
 from .sources import youtube as yt
@@ -204,6 +204,14 @@ def resolve(
                 mb.claims_for, title, artist, weight=weights["musicbrainz"]
             )] = "musicbrainz"
 
+        # Community DJ-set tracklists. Scoped to mixes by the registry, and
+        # slow by design (one request per five seconds, cached on disk), so
+        # it is only worth asking when there is a set to identify.
+        if "1001tracklists" in active_names and tracklists1001.parser_available():
+            query = strip_noise(info.get("title") or "")
+            if query:
+                jobs[pool.submit(tracklists1001.candidates_for, query)] = "1001tracklists"
+
         if "discogs" in active_names:
             title, artist = _seed_from_youtube(info)
             token = credential_value("DISCOGS_TOKEN", environ)
@@ -236,7 +244,9 @@ def resolve(
             if not outcome:
                 continue
             consulted.append(name)
-            if name == "silence":
+            if name == "1001tracklists":
+                contributions[name] = outcome
+            elif name == "silence":
                 duration = float(info.get("duration") or 0.0)
                 starts = silence_mod.boundaries_from_gaps(outcome, duration)
                 contributions[name] = [
